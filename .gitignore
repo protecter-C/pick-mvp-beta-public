@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.db
+node_modules/
+.next/
+coverage/
+.dart_tool/
+.flutter-plugins*
+build/
+.tools/

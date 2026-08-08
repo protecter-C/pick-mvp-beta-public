@@ -1,0 +1,5 @@
+package app.pick.pick_mobile
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
