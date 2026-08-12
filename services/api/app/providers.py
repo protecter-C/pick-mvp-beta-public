@@ -198,7 +198,10 @@ class SerpApiShoppingProvider:
         for attempt in range(self.retries + 1):
             try:
                 payload = self._fetch_json(params)
-                if payload.get("error"):
+                # SerpApi can attach a Google warning alongside usable
+                # Shopping rows.  Real priced rows remain authoritative; only
+                # fail closed when no result payload is available.
+                if payload.get("error") and not payload.get("shopping_results"):
                     raise ProviderError(str(payload["error"]))
                 with self._lock:
                     self._cache[key] = (time.monotonic(), payload)

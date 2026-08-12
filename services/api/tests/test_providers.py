@@ -52,6 +52,14 @@ def test_serpapi_retries_transient_failure_and_maps_price():
     assert calls == 2
 
 
+def test_serpapi_keeps_real_shopping_rows_when_provider_includes_warning():
+    response = {"error": "Google returned a partial response", "shopping_results": SHOPPING_RESPONSE["shopping_results"]}
+    provider = SerpApiShoppingProvider(api_key="test-key", fetch_json=lambda _params: response)
+    product = provider.resolve("headphones")
+    assert product.external_id == "abc-123"
+    assert product.current_price_cents == 129900
+
+
 def test_korean_query_uses_korean_shopping_locale_and_won_minor_units():
     calls = []
     response = {"shopping_results": [{"product_id": "kr-1", "title": "무선 헤드폰", "source": "  판매   자 ", "price": "₩129,000", "extracted_price": 129000, "product_link": "https://shop.kr/p/1"}]}
