@@ -170,6 +170,27 @@ class AnalyticsEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class BetaInvite(Base):
+    __tablename__ = "beta_invites"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    invited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BetaFeedback(Base):
+    __tablename__ = "beta_feedback"
+    __table_args__ = (UniqueConstraint("user_id", "decision_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    decision_id: Mapped[int] = mapped_column(ForeignKey("decisions.id"), index=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Referral(Base):
     __tablename__ = "referrals"
     id: Mapped[int] = mapped_column(primary_key=True)

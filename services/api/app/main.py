@@ -89,9 +89,15 @@ def register(data: schemas.RegisterIn, db: Session = Depends(get_db)):
     email = data.email.lower()
     if db.scalar(select(models.User.id).where(models.User.email == email)):
         raise HTTPException(status_code=409, detail="Email already registered")
+    settings = get_settings()
+    invite = db.scalar(select(models.BetaInvite).where(models.BetaInvite.email == email))
+    if settings.requires_beta_invite and email not in settings.beta_allowlist and invite is None:
+        raise HTTPException(status_code=403, detail="Closed beta invitation required")
     user = models.User(email=email, password_hash=hash_password(data.password), name=data.name, referral_code=services.unique_referral_code(db), preferences={})
     db.add(user)
     db.flush()
+    if invite is not None and invite.accepted_at is None:
+        invite.accepted_at = datetime.now(timezone.utc)
     services.add_points(db, user.id, 20, "Welcome to PICK", "signup", user.id)
     if data.referral_code:
         referrer = db.scalar(select(models.User).where(models.User.referral_code == data.referral_code.upper()))
@@ -210,6 +216,8 @@ def search_products(q: str = Query(min_length=2), db: Session = Depends(get_db),
 def analyze(data: schemas.AnalyzeIn, db: Session = Depends(get_db), user: models.User = Depends(current_user)):
     product = services.get_or_create_product(db, product_provider.resolve(data.query))
     analytics.record_event(db, "product_check", user_id=user.id, product_id=product.id, properties={"source": "analyze"})
+    if db.scalar(select(models.Decision.id).where(models.Decision.user_id == user.id).limit(1)) is None:
+        analytics.record_event(db, "first_check", event_id=f"first-check:{user.id}", user_id=user.id, product_id=product.id)
     scored = score_decision(ScoreInput(product.current_price_cents, product.typical_price_cents, data.budget_cents, data.fit, data.urgency, product.rating))
     prevented = product.current_price_cents if scored.verdict == models.Verdict.PASS else 0
     explanation = f"{scored.verdict.value}: deterministic score {scored.score}/100 based on value, budget, fit, timing, and quality."
@@ -247,7 +255,9 @@ def create_watch(data: schemas.WatchIn, db: Session = Depends(get_db), user: mod
     else:
         watch = models.PriceWatch(user_id=user.id, product_id=data.product_id, target_price_cents=data.target_price_cents)
         db.add(watch)
-    analytics.record_event(db, "track", user_id=user.id, product_id=data.product_id, properties={"target_price_cents": data.target_price_cents})
+    tracking_properties = {"target_price_cents": data.target_price_cents}
+    analytics.record_event(db, "track", user_id=user.id, product_id=data.product_id, properties=tracking_properties)
+    analytics.record_event(db, "price_track", user_id=user.id, product_id=data.product_id, properties=tracking_properties)
     db.commit()
     return {"id": watch.id, "product_id": watch.product_id, "target_price_cents": watch.target_price_cents, "active": watch.active}
 
@@ -296,6 +306,21 @@ def update_purchase(purchase_id: int, data: schemas.PurchaseUpdate, db: Session 
     if first_checkin:
         services.add_points(db, user.id, 15, "Post-purchase check-in", "purchase", purchase.id)
         analytics.record_event(db, "satisfaction", user_id=user.id, product_id=purchase.product_id, purchase_id=purchase.id, properties={"satisfaction": purchase.satisfaction})
+        if not purchase.returned:
+            realized_savings = max(0, purchase.product.typical_price_cents - purchase.price_paid_cents)
+            analytics.record_event(db, "realized_savings", event_id=f"realized-savings:{purchase.id}", user_id=user.id, product_id=purchase.product_id, purchase_id=purchase.id, value_cents=realized_savings)
+            decision = db.get(models.Decision, purchase.decision_id) if purchase.decision_id else None
+            if decision:
+                discount = (purchase.product.typical_price_cents - purchase.price_paid_cents) / max(purchase.product.typical_price_cents, 1)
+                value = max(0, min(100, round(60 + discount * 160)))
+                timing = max(0, min(100, round(decision.urgency * 10 + discount * 100)))
+                score = choice_score(value, decision.fit * 10, timing, purchase.satisfaction)
+                previous = db.scalar(select(models.AnalyticsEvent).where(models.AnalyticsEvent.user_id == user.id, models.AnalyticsEvent.event_name == "choice_score_change").order_by(models.AnalyticsEvent.occurred_at.desc()))
+                previous_score = (previous.properties or {}).get("score") if previous else None
+                analytics.record_event(db, "choice_score_change", event_id=f"choice-score:{purchase.id}:{purchase.satisfaction}", user_id=user.id, product_id=purchase.product_id, purchase_id=purchase.id, properties={"score": score, "delta": score - int(previous_score) if isinstance(previous_score, int) else 0})
+    if data.returned is True:
+        realized_savings = max(0, purchase.product.typical_price_cents - purchase.price_paid_cents)
+        analytics.record_event(db, "realized_savings_reversal", event_id=f"realized-savings-reversal:{purchase.id}", user_id=user.id, product_id=purchase.product_id, purchase_id=purchase.id, value_cents=-realized_savings)
     db.commit()
     return {"id": purchase.id, "satisfaction": purchase.satisfaction, "returned": purchase.returned}
 
@@ -336,6 +361,23 @@ def read_notification(notification_id: int, db: Session = Depends(get_db), user:
     return {"id": item.id, "read": True}
 
 
+@app.post("/beta-feedback", status_code=201)
+def beta_feedback(data: schemas.BetaFeedbackIn, db: Session = Depends(get_db), user: models.User = Depends(current_user)):
+    services.owned(db, models.Decision, data.decision_id, user.id)
+    feedback = db.scalar(select(models.BetaFeedback).where(models.BetaFeedback.user_id == user.id, models.BetaFeedback.decision_id == data.decision_id))
+    created = feedback is None
+    if feedback is None:
+        feedback = models.BetaFeedback(user_id=user.id, decision_id=data.decision_id, category=data.category, rating=data.rating, message=data.message.strip() if data.message else None)
+        db.add(feedback)
+        db.flush()
+    else:
+        feedback.category, feedback.rating, feedback.message = data.category, data.rating, data.message.strip() if data.message else None
+    if created:
+        analytics.record_event(db, "feedback", event_id=f"feedback:{feedback.id}", user_id=user.id, decision_id=data.decision_id, properties={"category": feedback.category, "rating": feedback.rating or 0})
+    db.commit()
+    return {"id": feedback.id, "decision_id": feedback.decision_id, "category": feedback.category, "rating": feedback.rating}
+
+
 @app.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), user: models.User = Depends(current_user)):
     decisions = db.scalars(select(models.Decision).where(models.Decision.user_id == user.id)).all()
@@ -362,3 +404,25 @@ def admin_metrics(days: int = Query(default=30, ge=1, le=365), _: None = Depends
 @app.get("/admin/metrics/export")
 def export_admin_metrics(days: int = Query(default=30, ge=1, le=365), _: None = Depends(require_admin), db: Session = Depends(get_db)):
     return {"format": "json", "retention_days": get_settings().analytics_retention_days, "metrics": analytics.aggregate_metrics(db, days)}
+
+
+@app.get("/admin/beta-dashboard")
+def admin_beta_dashboard(days: int = Query(default=30, ge=1, le=365), _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    return analytics.beta_dashboard(db, days)
+
+
+@app.post("/admin/beta-invites", status_code=201)
+def create_beta_invite(data: schemas.BetaInviteIn, _: None = Depends(require_admin), db: Session = Depends(get_db)):
+    email = data.email.lower()
+    invite = db.scalar(select(models.BetaInvite).where(models.BetaInvite.email == email))
+    if invite is None:
+        invite = models.BetaInvite(email=email)
+        db.add(invite)
+        db.commit()
+    return {"email": invite.email, "accepted": invite.accepted_at is not None}
+
+
+@app.get("/admin/beta-invites")
+def list_beta_invites(_: None = Depends(require_admin), db: Session = Depends(get_db)):
+    invites = db.scalars(select(models.BetaInvite).order_by(models.BetaInvite.invited_at.desc())).all()
+    return {"invited": len(invites), "accepted": sum(invite.accepted_at is not None for invite in invites)}

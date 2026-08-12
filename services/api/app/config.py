@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     admin_api_key: str = "local-admin-key"
     analytics_retention_days: int = 90
     analytics_export_path: str = ""
+    beta_invite_required: bool = True
+    beta_allowlist_emails: str = ""
 
     @property
     def auto_create_schema(self) -> bool:
@@ -35,6 +37,14 @@ class Settings(BaseSettings):
     def allows_mock_providers(self) -> bool:
         """Mocks are a local/test convenience and are never production data."""
         return self.environment.lower() in {"development", "test"}
+
+    @property
+    def requires_beta_invite(self) -> bool:
+        return self.environment.lower() == "production" and self.beta_invite_required
+
+    @property
+    def beta_allowlist(self) -> set[str]:
+        return {email.strip().lower() for email in self.beta_allowlist_emails.split(",") if email.strip()}
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

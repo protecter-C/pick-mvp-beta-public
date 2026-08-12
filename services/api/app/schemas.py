@@ -139,3 +139,14 @@ class AffiliateConversionOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class BetaInviteIn(BaseModel):
+    email: EmailStr
+
+
+class BetaFeedbackIn(BaseModel):
+    decision_id: int = Field(gt=0)
+    category: Literal["accuracy", "price", "tracking", "experience", "other"]
+    rating: int | None = Field(default=None, ge=1, le=5)
+    message: str | None = Field(default=None, max_length=1000)
