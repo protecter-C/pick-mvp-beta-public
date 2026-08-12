@@ -44,29 +44,58 @@ def require_admin(x_admin_key: str | None = Header(default=None, alias="X-Admin-
     if not x_admin_key or not secrets.compare_digest(x_admin_key, get_settings().admin_api_key):
         raise HTTPException(status_code=403, detail="Admin access required")
 
+
+def _request_traffic_source(request: Request) -> str:
+    path = request.url.path
+    user_agent = request.headers.get("user-agent", "").casefold()
+    if path in {"/health", "/ready"}:
+        return "health"
+    if path.startswith("/admin"):
+        return "admin"
+    if any(token in user_agent for token in ("testclient", "pytest", "httpx", "curl/", "postman", "powershell")):
+        return "test"
+    if any(token in user_agent for token in ("bot", "spider", "crawler", "uptime")):
+        return "bot"
+    if any(token in user_agent for token in ("mozilla/", "dart/", "flutter")):
+        return "organic"
+    return "unclassified"
+
+
+def _stable_route(request: Request) -> str:
+    route = request.scope.get("route")
+    if route is not None and getattr(route, "path", None):
+        return route.path
+    # Do not collect arbitrary unknown paths, which can contain user data.
+    return "unmatched"
+
 @app.middleware("http")
 async def analytics_errors(request: Request, call_next):
-    route_path = getattr(request.scope.get("route"), "path", request.url.path)
+    context_token = analytics.set_traffic_context(_request_traffic_source(request), _stable_route(request))
     try:
         response = await call_next(request)
     except Exception:
         response = None
+        route_path = _stable_route(request)
         logger.exception("api_request_error", extra={"event": "api_request_error", "method": request.method, "path": route_path, "status_code": 500})
         try:
             db = SessionLocal()
-            analytics.record_event(db, "error", properties={"status_code": 500, "method": request.method, "path": route_path})
+            analytics.record_event(db, "error", properties={"status_code": 500, "method": request.method, "route": route_path})
             db.commit(); db.close()
         except Exception:
             pass
+        finally:
+            analytics.reset_traffic_context(context_token)
         raise
     if response.status_code >= 400:
+        route_path = _stable_route(request)
         logger.warning("api_request_failed", extra={"event": "api_request_failed", "method": request.method, "path": route_path, "status_code": response.status_code})
         try:
             db = SessionLocal()
-            analytics.record_event(db, "error", properties={"status_code": response.status_code, "method": request.method, "path": route_path})
+            analytics.record_event(db, "error", properties={"status_code": response.status_code, "method": request.method, "route": route_path})
             db.commit(); db.close()
         except Exception:
             pass
+    analytics.reset_traffic_context(context_token)
     return response
 
 
