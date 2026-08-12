@@ -52,6 +52,10 @@ class ProviderError(RuntimeError):
     """A provider failed or returned unusable data."""
 
 
+class ProviderUnavailable(ProviderError):
+    """Live provider data cannot support a decision at this time."""
+
+
 def normalize_url(value: str) -> str:
     parsed = urlparse(value.strip())
     if not parsed.scheme or not parsed.netloc:
@@ -262,32 +266,44 @@ class SerpApiShoppingProvider:
 
 
 class FallbackProductProvider:
-    def __init__(self, primary: ProductProvider, fallback: ProductProvider):
-        self.primary, self.fallback = primary, fallback
+    """Development/test fallback only; production callers must use the live provider."""
+
+    def __init__(self, primary: ProductProvider, fallback: ProductProvider, allow_mock_fallback: bool = True):
+        self.primary, self.fallback, self.allow_mock_fallback = primary, fallback, allow_mock_fallback
 
     def resolve(self, query: str) -> ProductData:
         try:
             return self.primary.resolve(query)
-        except Exception:
-            return self.fallback.resolve(query)
+        except Exception as error:
+            if self.allow_mock_fallback:
+                return self.fallback.resolve(query)
+            raise ProviderUnavailable("Live product data is unavailable") from error
 
     def alternatives(self, product: ProductData) -> list[ProductData]:
         try:
             alternatives = self.primary.alternatives(product)
-            return alternatives or self.fallback.alternatives(product)
-        except Exception:
+            if alternatives or not self.allow_mock_fallback:
+                return alternatives
             return self.fallback.alternatives(product)
+        except Exception as error:
+            if self.allow_mock_fallback:
+                return self.fallback.alternatives(product)
+            raise ProviderUnavailable("Live alternative data is unavailable") from error
 
 
 class FallbackPriceProvider:
-    def __init__(self, primary: PriceProvider, fallback: PriceProvider):
-        self.primary, self.fallback = primary, fallback
+    """Development/test fallback only; production callers must use the live provider."""
+
+    def __init__(self, primary: PriceProvider, fallback: PriceProvider, allow_mock_fallback: bool = True):
+        self.primary, self.fallback, self.allow_mock_fallback = primary, fallback, allow_mock_fallback
 
     def current_price(self, external_id: str, fallback_cents: int) -> int:
         try:
             return self.primary.current_price(external_id, fallback_cents)
-        except Exception:
-            return self.fallback.current_price(external_id, fallback_cents)
+        except Exception as error:
+            if self.allow_mock_fallback:
+                return self.fallback.current_price(external_id, fallback_cents)
+            raise ProviderUnavailable("Live price data is unavailable") from error
 
 
 class PassthroughAffiliateProvider:
@@ -304,8 +320,18 @@ class InMemoryNotificationProvider:
         return None
 
 
-real_provider = SerpApiShoppingProvider()
-product_provider: ProductProvider = FallbackProductProvider(real_provider, MockProductProvider())
-price_provider: PriceProvider = FallbackPriceProvider(real_provider, MockPriceProvider())
-affiliate_provider: AffiliateProvider = MockAffiliateProvider()
+def build_runtime_providers(settings=None) -> tuple[ProductProvider, PriceProvider, AffiliateProvider]:
+    """Select deterministic mocks only outside production."""
+    settings = settings or get_settings()
+    live_provider = SerpApiShoppingProvider(api_key=settings.serpapi_key)
+    if settings.allows_mock_providers:
+        return (
+            FallbackProductProvider(live_provider, MockProductProvider(), allow_mock_fallback=True),
+            FallbackPriceProvider(live_provider, MockPriceProvider(), allow_mock_fallback=True),
+            MockAffiliateProvider(),
+        )
+    return live_provider, live_provider, PassthroughAffiliateProvider()
+
+
+product_provider, price_provider, affiliate_provider = build_runtime_providers()
 notification_provider: NotificationProvider = InMemoryNotificationProvider()

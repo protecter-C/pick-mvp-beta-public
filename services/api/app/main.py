@@ -4,13 +4,14 @@ import json
 import logging
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from . import affiliate, analytics, models, schemas, services
 from .config import get_settings, validate_runtime_settings
 from .database import Base, SessionLocal, engine, get_db
 from .jobs import PriceTrackingJob
-from .providers import price_provider, product_provider
+from .providers import ProviderError, price_provider, product_provider
 from .scoring import ScoreInput, choice_score, score_decision
 from .security import create_token, current_user, hash_password, verify_password
 
@@ -28,6 +29,15 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="PICK API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.exception_handler(ProviderError)
+async def live_provider_unavailable(_: Request, error: ProviderError):
+    logger.warning("live_provider_unavailable", extra={"event": "live_provider_unavailable", "error_type": type(error).__name__})
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Live product or price data is temporarily unavailable; no verdict was issued.", "status": "unavailable", "confidence": "low"},
+    )
 
 def require_admin(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")):
     import secrets
@@ -172,8 +182,13 @@ def product_out(product: models.Product) -> schemas.ProductOut:
 def decision_out(db: Session, decision: models.Decision, include_alternatives: bool = False) -> schemas.DecisionOut:
     alternatives = []
     if include_alternatives:
-        data = product_provider.resolve(decision.product.external_id)
-        alternatives = [product_out(services.serialize_product_data(db, item)) for item in product_provider.alternatives(data)]
+        try:
+            data = product_provider.resolve(decision.product.external_id)
+            alternatives = [product_out(services.serialize_product_data(db, item)) for item in product_provider.alternatives(data)]
+        except ProviderError:
+            # The primary live observation already supports this decision; do
+            # not substitute synthetic alternatives when a follow-up fails.
+            alternatives = []
     result = schemas.DecisionOut.model_validate(decision)
     result.alternatives = alternatives
     return result
@@ -182,7 +197,10 @@ def decision_out(db: Session, decision: models.Decision, include_alternatives: b
 @app.get("/products/search", response_model=list[schemas.ProductOut])
 def search_products(q: str = Query(min_length=2), db: Session = Depends(get_db), user: models.User = Depends(current_user)):
     primary = product_provider.resolve(q)
-    products = [primary, *product_provider.alternatives(primary)]
+    try:
+        products = [primary, *product_provider.alternatives(primary)]
+    except ProviderError:
+        products = [primary]
     result = [product_out(services.get_or_create_product(db, item)) for item in products]
     db.commit()
     return result

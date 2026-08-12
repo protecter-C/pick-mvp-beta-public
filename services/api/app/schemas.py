@@ -98,7 +98,7 @@ class RedeemIn(BaseModel):
 
 class AffiliateClickIn(BaseModel):
     product_id: int
-    provider: str = Field(default="mock", min_length=1, max_length=40)
+    provider: str = Field(default="direct", min_length=1, max_length=40)
     destination_url: str = Field(min_length=1, max_length=2000)
 
 

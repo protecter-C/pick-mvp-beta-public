@@ -32,10 +32,13 @@ def create_click(db: Session, user_id: int, data: schemas.AffiliateClickIn) -> m
     product = db.get(models.Product, data.product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
-    provider = data.provider.strip().lower()
+    settings = get_settings()
+    # Without a verified live affiliate adapter, production records a direct
+    # merchant click only.  It never labels the click as mock attribution.
+    provider = data.provider.strip().lower() if settings.allows_mock_providers else "direct"
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    click = models.AffiliateClick(user_id=user_id, product_id=product.id, provider=provider, click_token=token, destination_url=attach_click_token(affiliate_provider.outbound_url(data.destination_url), token), created_at=now, expires_at=now + timedelta(days=get_settings().affiliate_click_ttl_days))
+    click = models.AffiliateClick(user_id=user_id, product_id=product.id, provider=provider, click_token=token, destination_url=attach_click_token(affiliate_provider.outbound_url(data.destination_url), token), created_at=now, expires_at=now + timedelta(days=settings.affiliate_click_ttl_days))
     db.add(click)
     db.commit()
     return click
@@ -55,6 +58,8 @@ def _reward_points(commission_cents: int) -> int:
 
 
 def process_conversion(db: Session, data: schemas.AffiliateConversionIn, provider: str | None = None, user_id: int | None = None) -> models.AffiliateConversion:
+    if not get_settings().allows_mock_providers:
+        raise HTTPException(status_code=503, detail="Affiliate conversion ingestion is unavailable until a live provider is configured")
     click = db.scalar(select(models.AffiliateClick).where(models.AffiliateClick.click_token == data.click_token))
     if click is None:
         raise HTTPException(status_code=400, detail="Unknown or expired affiliate click")

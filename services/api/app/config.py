@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     def auto_create_schema(self) -> bool:
         return self.environment.lower() in {"development", "test"}
 
+    @property
+    def allows_mock_providers(self) -> bool:
+        """Mocks are a local/test convenience and are never production data."""
+        return self.environment.lower() in {"development", "test"}
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
