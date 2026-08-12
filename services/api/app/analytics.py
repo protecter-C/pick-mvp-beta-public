@@ -52,11 +52,13 @@ def beta_dashboard(db: Session, days: int = 30) -> dict:
     retained = int(db.scalar(select(func.count(models.User.id)).where(models.User.created_at < cohort_cutoff, models.User.id.in_(active_user_ids))) or 0)
     new_users = int(db.scalar(select(func.count(models.User.id)).where(models.User.created_at >= since)) or 0)
     active_users = int(db.scalar(select(func.count(distinct(models.AnalyticsEvent.user_id))).where(models.AnalyticsEvent.occurred_at >= since, models.AnalyticsEvent.user_id.is_not(None), models.AnalyticsEvent.event_name != "error")) or 0)
-    error_rows = db.execute(select(models.AnalyticsEvent.properties, func.count(models.AnalyticsEvent.id)).where(models.AnalyticsEvent.event_name == "error", models.AnalyticsEvent.occurred_at >= since).group_by(models.AnalyticsEvent.properties)).all()
+    # PostgreSQL's JSON type has no equality operator, so aggregate the small
+    # operational error stream in Python rather than grouping on raw JSON.
+    error_rows = db.scalars(select(models.AnalyticsEvent.properties).where(models.AnalyticsEvent.event_name == "error", models.AnalyticsEvent.occurred_at >= since)).all()
     errors: dict[str, int] = {}
-    for properties, count in error_rows:
+    for properties in error_rows:
         status = str((properties or {}).get("status_code", "unknown"))
-        errors[status] = errors.get(status, 0) + int(count)
+        errors[status] = errors.get(status, 0) + 1
     feedback_rows = db.execute(select(models.BetaFeedback.category, func.count(models.BetaFeedback.id)).where(models.BetaFeedback.created_at >= since).group_by(models.BetaFeedback.category)).all()
     invitations = {
         "invited": int(db.scalar(select(func.count(models.BetaInvite.id))) or 0),
